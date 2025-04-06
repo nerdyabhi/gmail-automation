@@ -1,24 +1,59 @@
 require('dotenv').config();
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const { getRandomUserAgent } = require('./lib/utils');
-const { initBrowser } = require('./lib/browser');
-const { getProxy } = require('./services/proxyService');
-const { performHumanLikeActions } = require('./lib/humanBehavior');
+const utils = require('./lib/utils.js');
+const { initBrowser } = require('./lib/browser.js');
+const { getProxy } = require('./services/proxyService.js');
+const { executeGmailSignup } = require('./lib/gmailAutomation.js');
+const fs = require('fs').promises;
+const path = require('path');
 
 // Apply stealth plugin to avoid detection
 puppeteer.use(StealthPlugin());
+
+// Global variable to store the browser instance for debugging
+let globalBrowser = null;
+let globalPage = null;
 
 async function createGmailAccount(accountData) {
   const proxy = await getProxy();
   const browser = await initBrowser(proxy);
   
+  // Set global browser for debugging
+  globalBrowser = browser;
+  
   try {
     const page = await browser.newPage();
+    globalPage = page;
     
-    // Set random user agent
-    const userAgent = getRandomUserAgent();
+    // Create screenshots directory if it doesn't exist
+    await fs.mkdir(path.join(__dirname, 'screenshots'), { recursive: true });
+    
+    // Set random user agent with fallback
+    let userAgent;
+    try {
+      if (typeof utils.getRandomUserAgent === 'function') {
+        userAgent = utils.getRandomUserAgent();
+      } else {
+        // Fallback if function not available
+        userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36';
+        console.warn('Using fallback user agent because getRandomUserAgent is not available');
+      }
+    } catch (error) {
+      userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36';
+      console.warn('Error getting random user agent, using fallback:', error.message);
+    }
+    
     await page.setUserAgent(userAgent);
+    
+    // Apply location settings based on proxy country
+    if (proxy && proxy.country) {
+      await utils.applyLocationSettings(page, proxy.country);
+      console.log(`Applied location settings for country: ${proxy.country}`);
+    } else {
+      console.log('No proxy country detected, using default location settings');
+      await utils.applyLocationSettings(page, 'US'); // Default to US
+    }
     
     // Set additional headers to appear more human-like
     await page.setExtraHTTPHeaders({
@@ -26,111 +61,45 @@ async function createGmailAccount(accountData) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
-    // Navigate to Gmail signup
-    await page.goto('https://accounts.google.com/signup', {
-      waitUntil: 'networkidle2',
-      timeout: 60000
-    });
+    // Execute the full Gmail signup process
+    const success = await executeGmailSignup(page, accountData);
     
-    // Add random delay to simulate human behavior
-    await page.waitForTimeout(2000 + Math.floor(Math.random() * 2000));
-    
-    // Fill out the form using human-like behaviors
-    await performHumanLikeActions(page, accountData);
-    
-    // Fill in first name and last name
-    await page.type('input[name="firstName"]', accountData.firstName, {delay: 50 + Math.random() * 100});
-    await page.waitForTimeout(500 + Math.random() * 1000);
-    await page.type('input[name="lastName"]', accountData.lastName, {delay: 70 + Math.random() * 100});
-    await page.waitForTimeout(700 + Math.random() * 1000);
-    
-    // Click next button and wait for username screen
-    await page.click('#nextButton');
-    await page.waitForSelector('input[name="Username"]', {timeout: 10000});
-    
-    // Enter username with natural typing speed
-    await page.type('input[name="Username"]', accountData.username, {delay: 100 + Math.random() * 150});
-    await page.waitForTimeout(1000 + Math.random() * 1500);
-    
-    // Enter password
-    await page.type('input[name="Passwd"]', accountData.password, {delay: 80 + Math.random() * 120});
-    await page.waitForTimeout(800 + Math.random() * 1200);
-    await page.type('input[name="ConfirmPasswd"]', accountData.password, {delay: 90 + Math.random() * 130});
-    
-    // Click next and wait for phone verification
-    await page.click('#nextButton');
-    await page.waitForSelector('input[id="phoneNumberId"]', {timeout: 10000});
-    
-    // Enter phone number if provided
-    if (accountData.phoneNumber) {
-      await page.type('input[id="phoneNumberId"]', accountData.phoneNumber, {delay: 70 + Math.random() * 100});
-      await page.click('#nextButton');
+    if (success) {
+      console.log('Account creation process completed successfully');
       
-      // Wait for verification code
-      console.log('Waiting for SMS verification code...');
-      await page.waitForSelector('input[name="code"]', {timeout: 120000});
+      // Save a screenshot as evidence
+      await page.screenshot({path: `./screenshots/${accountData.username}_account_created.png`});
       
-      // Prompt for verification code (in a real system, this would be automated)
-      // This is a placeholder - you would replace this with your SMS verification service
-      const verificationCode = await promptForVerificationCode();
-      await page.type('input[name="code"]', verificationCode, {delay: 150 + Math.random() * 200});
-      await page.click('#nextButton');
+      return {
+        success: true,
+        username: accountData.username,
+        password: accountData.password,
+        timestamp: new Date().toISOString(),
+        browser: browser, // Include browser for manual debugging if needed
+        page: page
+      };
+    } else {
+      console.error('Account creation process failed');
+      
+      // Save screenshot of the error state
+      await page.screenshot({path: `./screenshots/error_${Date.now()}.png`});
+      
+      return {
+        success: false,
+        error: 'Account creation process failed',
+        timestamp: new Date().toISOString(),
+        browser: browser, // Include browser for manual debugging
+        page: page
+      };
     }
-    
-    // Complete additional verification steps if they appear
-    try {
-      await page.waitForSelector('input[name="recoveryEmail"]', {timeout: 10000});
-      if (accountData.recoveryEmail) {
-        await page.type('input[name="recoveryEmail"]', accountData.recoveryEmail, {delay: 80 + Math.random() * 120});
-        await page.click('#nextButton');
-      }
-    } catch (e) {
-      // Recovery email step might be skipped
-      console.log('Recovery email step skipped or not found');
-    }
-    
-    // Enter birth date
-    try {
-      await page.waitForSelector('select#month', {timeout: 10000});
-      await page.select('select#month', accountData.birthMonth);
-      await page.type('input#day', accountData.birthDay, {delay: 50 + Math.random() * 70});
-      await page.type('input#year', accountData.birthYear, {delay: 70 + Math.random() * 90});
-      await page.select('select#gender', accountData.gender);
-      await page.click('#nextButton');
-    } catch (e) {
-      console.log('Birth date step skipped or not found:', e.message);
-    }
-    
-    // Accept terms
-    try {
-      await page.waitForSelector('input[type="checkbox"]', {timeout: 10000});
-      await page.click('input[type="checkbox"]');
-      await page.waitForTimeout(500 + Math.random() * 1000);
-      await page.click('#nextButton');
-    } catch (e) {
-      console.log('Terms acceptance step skipped or not found');
-    }
-    
-    // Wait for account creation to complete
-    await page.waitForNavigation({waitUntil: 'networkidle2', timeout: 60000});
-    
-    console.log('Account creation process completed successfully');
-    
-    // Save a screenshot as evidence (optional)
-    await page.screenshot({path: `./screenshots/${accountData.username}_account_created.png`});
-    
-    return {
-      success: true,
-      username: accountData.username,
-      password: accountData.password,
-      timestamp: new Date().toISOString()
-    };
   } catch (error) {
     console.error('Error creating account:', error);
     
-    // Save screenshot of the error state
+    // Save screenshot of the error state if page exists
     try {
-      await page.screenshot({path: `./screenshots/error_${Date.now()}.png`});
+      if (globalPage) {
+        await globalPage.screenshot({path: `./screenshots/error_${Date.now()}.png`});
+      }
     } catch (screenshotError) {
       console.error('Failed to capture error screenshot:', screenshotError);
     }
@@ -138,18 +107,28 @@ async function createGmailAccount(accountData) {
     return {
       success: false,
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      browser: globalBrowser, // Include browser for manual debugging
+      page: globalPage
     };
-  } finally {
-    await browser.close();
+  }
+  // No finally block with browser.close() so browser stays open for debugging
+}
+
+// Function to manually close browser when done debugging
+async function closeBrowser() {
+  if (globalBrowser) {
+    await globalBrowser.close();
+    globalBrowser = null;
+    globalPage = null;
+    console.log("Browser closed manually");
   }
 }
 
-// Placeholder function - replace with actual SMS verification service
-async function promptForVerificationCode() {
-  // In a real implementation, this would connect to an SMS service API
-  // For now, it's just a mock implementation
-  return "123456"; // Replace with actual code retrieval logic
-}
-
-module.exports = { createGmailAccount };
+// Export the functions
+module.exports = { 
+  createGmailAccount,
+  closeBrowser,
+  getBrowser: () => globalBrowser,
+  getPage: () => globalPage
+};

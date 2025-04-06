@@ -7,9 +7,40 @@ const path = require('path');
 const PROXY_CACHE_PATH = path.join(__dirname, '../data/proxy-cache.json');
 const WEBSHARE_API_URL = 'https://proxy.webshare.io/api/proxy/list/';
 
+// Function to get direct proxy from environment variables
+function getDirectProxy() {
+  if (process.env.WEBSHARE_USERNAME && process.env.WEBSHARE_PASSWORD && process.env.WEBSHARE_PROXY) {
+    const [host, port] = process.env.WEBSHARE_PROXY.split(':');
+    return {
+      host,
+      port: parseInt(port),
+      username: process.env.WEBSHARE_USERNAME,
+      password: process.env.WEBSHARE_PASSWORD,
+      protocol: 'http'
+    };
+  }
+  return null;
+}
+
 // Function to get a proxy from Webshare API
 async function fetchProxiesFromWebshare() {
+  // If no API key but have direct proxy credentials, use those instead
+  const directProxy = getDirectProxy();
+  if (!process.env.WEBSHARE_API_KEY && directProxy) {
+    console.log('Using direct proxy credentials from environment variables');
+    return [{ 
+      ...directProxy,
+      country: 'N/A',
+      lastUsed: null
+    }];
+  }
+  
   try {
+    // Only proceed with API call if API key is available
+    if (!process.env.WEBSHARE_API_KEY) {
+      throw new Error('Webshare API key not provided');
+    }
+    
     const response = await axios.get(WEBSHARE_API_URL, {
       headers: {
         'Authorization': `Token ${process.env.WEBSHARE_API_KEY}`
@@ -70,6 +101,23 @@ async function getCachedProxies() {
 // Function to get a proxy
 async function getProxy() {
   try {
+    // First check if we have direct proxy credentials
+    const directProxy = getDirectProxy();
+    if (directProxy) {
+      console.log('Using direct proxy configuration from environment variables');
+      // For direct proxies, we need to detect the country - might need to be added to env vars
+      if (!directProxy.country) {
+        try {
+          // Try to detect the country from the IP
+          directProxy.country = await require('../lib/utils').detectLocationFromIP(directProxy.host);
+        } catch (error) {
+          console.warn('Failed to detect country from direct proxy IP, using US as fallback');
+          directProxy.country = 'US';
+        }
+      }
+      return directProxy;
+    }
+    
     // Try to get cached proxies first
     let proxies = await getCachedProxies();
     
@@ -97,7 +145,8 @@ async function getProxy() {
       port: selectedProxy.port,
       username: selectedProxy.username,
       password: selectedProxy.password,
-      protocol: selectedProxy.protocol
+      protocol: selectedProxy.protocol,
+      country: selectedProxy.country || 'US' // Ensure country code is included
     };
   } catch (error) {
     console.error('Error getting proxy:', error);

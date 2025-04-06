@@ -1,6 +1,6 @@
 require('dotenv').config();
-const { createGmailAccount } = require('./script');
-const { generateRandomAccountData, saveAccount } = require('./lib/utils');
+const { createGmailAccount } = require('./script.js');
+const { generateRandomAccountData, saveAccount } = require('./lib/utils.js');
 
 async function main() {
   const numAccounts = process.env.ACCOUNTS_TO_CREATE || 1;
